@@ -12,7 +12,239 @@ import random
 import logging
 from collections import deque
 
+import sys
+# Add the root of the external project to the system path
+sys.path.append('/home/ivob/Projects/NLWebProjects/dev/NLWeb/code/python')
+
+# Now you can import the get_embedding function
+# But this requires additional pip installs
+# pip install -r requirements.txt
+# pyyaml>=6.0.1
+# python-dotenv>=1.0.0
+# openai>=1.12.0
+
+from core.embedding import get_embedding
+
+# Import database loading functions from local copies
+try:
+    # Try to import from external project first
+    from core.retriever import upload_documents, get_vector_db_client
+    from data_loading.db_load_utils import documents_from_csv_line
+    EXTERNAL_DB_AVAILABLE = True
+except ImportError:
+    # Fallback to local implementations if external project not available
+    EXTERNAL_DB_AVAILABLE = False
+    print("Warning: External database modules not available. Database functionality will be limited.")
+
+    # Create dummy functions to prevent errors
+    async def upload_documents(documents, **kwargs):
+        print(f"MOCK: Would upload {len(documents)} documents to database")
+        return len(documents)
+
+    def get_vector_db_client(**kwargs):
+        print("MOCK: Would return database client")
+        return None
+
 class Crawler:
+
+    def parse_embeddings_line(self, line, site):
+        """
+        Parse a line from an embeddings file with format: URL\tJSON\tEmbedding
+        Returns a document dict ready for database upload.
+        """
+        parts = line.strip().split('\t')
+        if len(parts) < 3:
+            raise ValueError(f"Invalid line format. Expected 3 tab-separated parts, got {len(parts)}")
+
+        url = parts[0]
+        json_data = parts[1]
+        embedding_str = parts[2]
+
+        # Parse the embedding vector
+        try:
+            # Handle both [1,2,3] and 1,2,3 formats
+            if embedding_str.startswith('[') and embedding_str.endswith(']'):
+                embedding_str = embedding_str[1:-1]
+
+            # Convert to list of floats
+            embedding = [float(x.strip()) for x in embedding_str.split(',')]
+        except (ValueError, AttributeError) as e:
+            raise ValueError(f"Invalid embedding format: {e}")
+
+        # Parse JSON to extract name and create document
+        try:
+            json_obj = json.loads(json_data)
+
+            # Extract name from JSON
+            name = json_obj.get('name', json_obj.get('title', 'Untitled'))
+            if not name:
+                name = f"Document from {url}"
+
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON data: {e}")
+
+        # Create document structure
+        document = {
+            "id": str(hash(url) % (2**63)),  # Create a stable ID from the URL
+            "schema_json": json_data,
+            "url": url,
+            "name": name,
+            "site": site,
+            "embedding": embedding
+        }
+
+        return document
+
+    def load_json_data(self, site):
+        """
+        Load the corresponding JSON data for a site.
+        Returns a dictionary mapping URLs to JSON objects.
+        """
+        json_file_path = f"data/json/{site}.json"
+        url_to_json = {}
+
+        try:
+            if os.path.exists(json_file_path):
+                with open(json_file_path, 'r', encoding='utf-8') as f:
+                    json_data = json.load(f)
+
+                    # Handle both array and single object
+                    if isinstance(json_data, list):
+                        items = json_data
+                    else:
+                        items = [json_data]
+
+                    for item in items:
+                        url = item.get('url', '')
+                        if url:
+                            url_to_json[url] = item
+
+                print(f"Loaded {len(url_to_json)} JSON objects for site {site}")
+            else:
+                print(f"JSON file not found: {json_file_path}")
+
+        except Exception as e:
+            print(f"Error loading JSON data for site {site}: {e}")
+
+        return url_to_json
+
+    async def load_embeddings_to_database(self, file_path, site, batch_size=100):
+        """
+        Load embeddings file directly to database.
+        This handles both JSON format and tab-separated format.
+        """
+        if not EXTERNAL_DB_AVAILABLE:
+            print("Database functionality not available - external modules not imported")
+            return 0
+
+        print(f"Loading embeddings from {file_path} for site {site}")
+
+        try:
+            documents = []
+            total_documents = 0
+
+            # Load corresponding JSON data for this site
+            url_to_json = self.load_json_data(site)
+
+            # Check if file is JSON format or tab-separated format
+            with open(file_path, 'r', encoding='utf-8') as f:
+                first_line = f.readline().strip()
+                f.seek(0)  # Reset file pointer
+
+                if first_line.startswith('[') or first_line.startswith('{'):
+                    # JSON format - load the entire file
+                    print("Detected JSON format embeddings file")
+                    embeddings_data = json.load(f)
+
+                    # Handle both array of objects and single object
+                    if isinstance(embeddings_data, list):
+                        items = embeddings_data
+                    else:
+                        items = [embeddings_data]
+
+                    for item in items:
+                        try:
+                            # Extract required fields
+                            url = item.get('key', item.get('url', ''))
+                            embedding = item.get('embedding', [])
+
+                            if not url or not embedding:
+                                print(f"Skipping item missing url or embedding: {item.keys()}")
+                                continue
+
+                            # Get JSON data from the loaded JSON file
+                            json_obj = url_to_json.get(url)
+                            if json_obj:
+                                json_data = json.dumps(json_obj)
+                                name = json_obj.get('headline', json_obj.get('name', json_obj.get('title', f'Document from {url}')))
+                            else:
+                                # Fallback: create minimal JSON from available data
+                                print(f"Warning: No JSON data found for URL {url}, creating minimal document")
+                                json_data = json.dumps({
+                                    'url': url,
+                                    'name': item.get('name', item.get('title', f'Document from {url}'))
+                                })
+                                name = item.get('name', item.get('title', f'Document from {url}'))
+
+                            # Create document structure
+                            document = {
+                                "id": str(hash(url) % (2**63)),
+                                "schema_json": json_data,
+                                "url": url,
+                                "name": name,
+                                "site": site,
+                                "embedding": embedding
+                            }
+
+                            documents.append(document)
+
+                            # Upload in batches
+                            if len(documents) >= batch_size:
+                                await upload_documents(documents)
+                                print(f"Uploaded batch of {len(documents)} documents")
+                                total_documents += len(documents)
+                                documents = []
+
+                        except Exception as e:
+                            print(f"Error processing item: {e}")
+                            continue
+
+                else:
+                    # Tab-separated format - process line by line
+                    print("Detected tab-separated format embeddings file")
+                    for line_num, line in enumerate(f, 1):
+                        if not line.strip():
+                            continue
+
+                        try:
+                            document = self.parse_embeddings_line(line, site)
+                            documents.append(document)
+
+                            # Upload in batches
+                            if len(documents) >= batch_size:
+                                await upload_documents(documents)
+                                print(f"Uploaded batch of {len(documents)} documents")
+                                total_documents += len(documents)
+                                documents = []
+
+                        except ValueError as e:
+                            print(f"Error parsing line {line_num}: {e}")
+                            continue
+
+            # Upload remaining documents
+            if documents:
+                await upload_documents(documents)
+                print(f"Uploaded final batch of {len(documents)} documents")
+                total_documents += len(documents)
+
+            print(f"Successfully loaded {total_documents} documents from {file_path}")
+            return total_documents
+
+        except Exception as e:
+            print(f"Error loading embeddings file {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0
     def __init__(self):
         self.url_queue = asyncio.Queue()
         self.sites_urls = {}  # site_name: [urls]
@@ -36,6 +268,8 @@ class Crawler:
         self.json_keys = {}  # site_name: set of JSON object URLs (keys)
         self.json_type_counts = {}  # site_name: {type: count}
         self.embeddings_queue = asyncio.Queue()  # Queue for embedding processing
+        self.database_queue = asyncio.Queue() # Queue for database processing
+
         self.processed_embeddings = {}  # site_name: set of processed JSON keys
         # Chrome user agent
         self.headers = {
@@ -508,7 +742,61 @@ class Crawler:
             except json.JSONDecodeError:
                 pass
         
+        # --- If nothing was found, try to synthesize ---
+        if not schema_data:
+            synthesized = self.synthesize_schema(soup, url)
+            if synthesized:
+                schema_data.append(synthesized)
+
         return schema_data
+
+    def synthesize_schema(self, soup, url):
+        """Build a basic JSON-LD object from meta tags / OG tags."""
+        title = soup.title.string.strip() if soup.title else None
+
+        desc = None
+        desc_tag = soup.find("meta", attrs={"name": "description"})
+        if desc_tag and desc_tag.get("content"):
+            desc = desc_tag["content"]
+
+        # OpenGraph fallbacks
+        og_title = soup.find("meta", property="og:title")
+        if og_title:
+            title = title or og_title.get("content")
+
+        og_desc = soup.find("meta", property="og:description")
+        if og_desc:
+            desc = desc or og_desc.get("content")
+
+        image = None
+        og_image = soup.find("meta", property="og:image")
+        if og_image:
+            image = og_image.get("content")
+
+        # Basic heuristic for type
+        schema_type = "Article" if soup.find("meta", property="article:published_time") else "WebPage"
+
+        synthesized = {
+            "url": url,
+            "timestamp": datetime.now().isoformat(),
+            "@context": "https://schema.org",
+            "@type": schema_type,
+            "headline": title,
+            "description": desc,
+        }
+        if image:
+            synthesized["image"] = image
+
+        # Add publication info if present
+        pub_date = soup.find("meta", property="article:published_time")
+        if pub_date:
+            synthesized["datePublished"] = pub_date.get("content")
+
+        author = soup.find("meta", property="article:author")
+        if author:
+            synthesized["author"] = {"@type": "Person", "name": author.get("content")}
+
+        return synthesized
     
     def save_schema_org(self, site_name, schema_data):
         """Save schema.org data to JSON file."""
@@ -684,7 +972,50 @@ class Crawler:
             except Exception as e:
                 # Suppressed: print(f"Worker {worker_id} error: {e}")
                 await asyncio.sleep(1)
-    
+
+    async def database_worker(self, worker_id: int):
+        """
+        Worker that loads documents with embeddings into the vector database.
+        """
+        print(f"Database worker {worker_id} started")
+        while self.running:
+            try:
+                # Get a file path from the database queue
+                file_path = await self.database_queue.get()
+
+                print(f"Database worker {worker_id} is processing embeddings file: {file_path}")
+
+                # Extract site name from the file path
+                # Assuming file path is like: data/embeddings/site_name/file.json
+                site_name = os.path.basename(os.path.dirname(file_path))
+
+                try:
+                    # Use our local function to load embeddings directly
+                    documents_loaded = await self.load_embeddings_to_database(
+                        file_path=file_path,
+                        site=site_name,
+                        batch_size=100
+                    )
+                    print(f"Successfully loaded {documents_loaded} documents from {file_path}")
+
+                except Exception as e:
+                    print(f"Error loading {file_path} to database: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+
+                # Signal that the task is done
+                self.database_queue.task_done()
+
+            except asyncio.CancelledError:
+                print(f"Database worker {worker_id} cancelled.")
+                break
+            except Exception as e:
+                print(f"An error occurred in database worker {worker_id}: {e}")
+                import traceback
+                traceback.print_exc()
+
+        print(f"Database worker {worker_id} stopped.")
+
     def prepare_text_for_embedding(self, json_obj):
         """Prepare text from JSON object for embedding."""
         # Extract key fields based on @type
@@ -742,8 +1073,6 @@ class Crawler:
                 
                 if texts:
                     try:
-                        # Import get_embedding function (assuming it's available)
-                        from embeddings_utils import get_embedding
                         
                         # Get embeddings for batch
                         embeddings = []
@@ -804,6 +1133,9 @@ class Crawler:
         with open(embeddings_file, 'w') as f:
             json.dump(existing_data, f, indent=2)
     
+        # Add the completed embeddings file to the database queue
+        self.database_queue.put_nowait(embeddings_file)
+
     def requeue_urls(self):
         """Requeue URLs with domain diversity."""
         # Group URLs by domain
@@ -882,7 +1214,11 @@ class Crawler:
             # Start embeddings worker
             embeddings_worker = asyncio.create_task(self.embeddings_worker())
             workers.append(embeddings_worker)
-            
+
+            # Start database worker
+            database_worker_task = asyncio.create_task(self.database_worker(0)) # Using worker_id 0
+            workers.append(database_worker_task)
+
             # Wait for all workers
             await asyncio.gather(*workers, return_exceptions=True)
     
