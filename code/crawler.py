@@ -36,6 +36,8 @@ class Crawler:
         self.json_keys = {}  # site_name: set of JSON object URLs (keys)
         self.json_type_counts = {}  # site_name: {type: count}
         self.embeddings_queue = asyncio.Queue()  # Queue for embedding processing
+        self.database_queue = asyncio.Queue() # Queue for database processing
+
         self.processed_embeddings = {}  # site_name: set of processed JSON keys
         # Chrome user agent
         self.headers = {
@@ -280,7 +282,7 @@ class Crawler:
             except Exception as e:
                 self.error_logger.error(f"Error in embeddings monitor thread | {str(e)}")
                 time.sleep(30)
-    
+
     def get_site_status(self, site_name):
         """Get current status for a site."""
         status_file = os.path.join('data', 'status', f"{site_name}.json")
@@ -743,7 +745,7 @@ class Crawler:
                 if texts:
                     try:
                         # Import get_embedding function (assuming it's available)
-                        from embeddings_utils import get_embedding
+                        from embeddings_utils.embedding import get_embedding
                         
                         # Get embeddings for batch
                         embeddings = []
@@ -768,7 +770,52 @@ class Crawler:
             except Exception as e:
                 self.error_logger.error(f"Embeddings worker error | {str(e)}")
                 await asyncio.sleep(1)
-    
+
+    async def database_worker(self):
+        """Worker that processes database queue.
+        Worker that processes JSON files and uploads to database with embeddings.
+        This follows the pattern from the reference code.
+        """
+        print(f"Database worker started")
+        while self.running:
+            try:
+                # Get a file path from the database queue
+                file_path = await self.database_queue.get()
+
+                print(f"Database worker is processing JSON file: {file_path}")
+
+                # Extract site name from the file path
+                # Assuming file path is like: data/json/site_name.json
+                site_name = os.path.basename(file_path).replace('.json', '')
+
+                try:
+                    # Process the JSON file with embeddings and upload to database
+                    documents_loaded = await self.process_json_file_with_embeddings(
+                        json_file_path=file_path,
+                        site=site_name,
+                        batch_size=100
+                    )
+                    print(f"Successfully processed {documents_loaded} documents from {file_path}")
+
+                except Exception as e:
+                    print(f"Error processing {file_path}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+
+                # Signal that the task is done
+                self.database_queue.task_done()
+
+            except asyncio.CancelledError:
+                print(f"Database worker cancelled.")
+                break
+            except Exception as e:
+                print(f"An error occurred in database worker: {e}")
+                import traceback
+                traceback.print_exc()
+
+        print(f"Database worker stopped.")
+
+
     async def save_embeddings(self, site_name, keys, embeddings, original_objects):
         """Save embeddings to file."""
         embeddings_dir = os.path.join('data', 'embeddings')
@@ -867,7 +914,7 @@ class Crawler:
         
         # Process any pending URLs that were added before loop was ready
         # (No longer needed with site queues)
-        
+
         # Create aiohttp session
         connector = aiohttp.TCPConnector(limit=self.MAX_CONCURRENT)
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -882,7 +929,11 @@ class Crawler:
             # Start embeddings worker
             embeddings_worker = asyncio.create_task(self.embeddings_worker())
             workers.append(embeddings_worker)
-            
+
+            # Start database worker
+            database_worker = asyncio.create_task(self.database_worker())
+            workers.append(database_worker)
+
             # Wait for all workers
             await asyncio.gather(*workers, return_exceptions=True)
     
