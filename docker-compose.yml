@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  crawler:
+    build: .
+    container_name: nlweb-crawler
+    volumes:
+      # Mount data directory to host for persistence and sharing with other apps
+      - ./data:/app/data
+      # Mount shared database directory for cross-app compatibility
+      - /home/ivob/Projects/NLWebProjects/dev/shared/data/db:/app/shared/data/db
+      # Mount code directory for development (comment out for production)
+      - ./code:/app/code
+      # Mount test files for development
+      - ./test_database_loading.py:/app/test_database_loading.py
+      # Mount external NLWeb project (adjust path as needed)
+      - /home/ivob/Projects/NLWebProjects/dev/NLWeb/code/python:/app/external
+    environment:
+      # Add the external project to Python path
+      - PYTHONPATH=/app:/app/code:/app/external
+      # Set data directory
+      - DATA_DIR=/app/data
+      # Add any API keys or configuration
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY:-}
+    networks:
+      - crawler-network
+    restart: unless-stopped
+    # Override command for different modes
+    # command: python code/crawler.py  # Default crawler
+    # command: python test_database_loading.py  # For testing
+    # command: python code/app.py  # For web interface
+    stdin_open: true
+    tty: true
+
+  # Optional: Add a database service if needed
+  # qdrant:
+  #   image: qdrant/qdrant:latest
+  #   container_name: nlweb-qdrant
+  #   ports:
+  #     - "6333:6333"
+  #     - "6334:6334"
+  #   volumes:
+  #     - qdrant_data:/qdrant/storage
+  #   networks:
+  #     - crawler-network
+
+networks:
+  crawler-network:
+    driver: bridge
+
+# volumes:
+#   qdrant_data:

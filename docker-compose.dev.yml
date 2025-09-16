@@ -1,0 +1,37 @@
+# Development version with more development-friendly settings
+version: '3.8'
+
+services:
+  crawler-dev:
+    build: .
+    container_name: nlweb-crawler-dev
+    volumes:
+      # Mount data directory to host
+      - ./data:/app/data
+      # Mount shared database directory for cross-app compatibility
+      - /home/ivob/Projects/NLWebProjects/dev/shared/data/db:/app/shared/data/db
+      # Mount entire project for live development
+      - .:/app/project
+      # Mount external NLWeb project
+      - /home/ivob/Projects/NLWebProjects/dev/NLWeb/code/python:/app/external
+    environment:
+      - PYTHONPATH=/app:/app/project/code:/app/external
+      - DATA_DIR=/app/data
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY:-}
+      # Development settings
+      - DEVELOPMENT=true
+      - LOG_LEVEL=DEBUG
+    working_dir: /app/project
+    networks:
+      - crawler-network
+    # Keep container running for development
+    command: tail -f /dev/null
+    stdin_open: true
+    tty: true
+    ports:
+      - "8000:8000"  # For web interface development
+
+networks:
+  crawler-network:
+    driver: bridge
