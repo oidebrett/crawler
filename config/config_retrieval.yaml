@@ -1,4 +1,4 @@
-write_endpoint: qdrant_local
+write_endpoint: qdrant_url
 
 endpoints:
 
@@ -84,7 +84,7 @@ endpoints:
 
   # Option 1: Local file-based Qdrant storage
   qdrant_local:
-    enabled: true
+    enabled: false
     # Use local file-based storage with a specific path
     database_path: "../data/db"
     # Set the collection name to use
@@ -94,7 +94,7 @@ endpoints:
     
   # Option 2: Remote Qdrant server
   qdrant_url:
-    enabled: false
+    enabled: true
     # Connect to a Qdrant server at a specific URL
     api_endpoint_env: QDRANT_URL
     # Optional API key for authentication

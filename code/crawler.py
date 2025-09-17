@@ -1024,7 +1024,7 @@ class Crawler:
                     # Upload to database
                     # Use specified database or default
                     print(f"\n📤 Uploading {len(transformed_documents)} documents to local Qdrant...")
-                    upload_count = await upload_documents(transformed_documents, endpoint_name="qdrant_local")
+                    upload_count = await upload_documents(transformed_documents)
                     print(f"✅ Uploaded {upload_count} documents")
 
                     # Save processed keys so we don't re-upload

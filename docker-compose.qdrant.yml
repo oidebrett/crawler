@@ -1,15 +1,17 @@
 services:
   # Add a database service if needed
   qdrant:
-     image: qdrant/qdrant:latest
-     container_name: nlweb-qdrant
-     ports:
-       - "6333:6333"
-       - "6334:6334"
-     volumes:
-       - qdrant_data:/qdrant/storage
-     networks:
-       - crawler-network
+    image: qdrant/qdrant:latest
+    container_name: nlweb-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - crawler-network
+    environment:
+      QDRANT__SERVICE__API_KEY: "<OPTIONAL>"       
 
 networks:
   crawler-network:
