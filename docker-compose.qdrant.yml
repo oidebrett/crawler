@@ -8,14 +8,14 @@ services:
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
-    networks:
-      - crawler-network
     environment:
       QDRANT__SERVICE__API_KEY: "<OPTIONAL>"       
+    networks:
+      - qdrant-net
 
 networks:
-  crawler-network:
-    driver: bridge
+  qdrant-net:
+    external: true     # don’t recreate, reuse the existing network
 
 volumes:
    qdrant_data:
