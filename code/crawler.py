@@ -152,11 +152,134 @@ class Crawler:
         filename = self.url_to_filename(url)
         return filename in self.crawled_urls[site_name]
     
+    def reverse_filename_lookup(self, site_name, filename):
+        """Infer URL by looking through urls/<site>.txt."""
+        url_file = os.path.join('data', 'urls', f"{site_name}.txt")
+        if not os.path.exists(url_file):
+            return None
+        for line in open(url_file):
+            url = line.strip()
+            if self.url_to_filename(url) == filename:
+                return url
+        return None
+
+    async def delete_urls_async(self, site_name, urls):
+        try:
+            from core.retriever import delete_documents_by_urls
+            delete_count = await delete_documents_by_urls(site_name, urls)
+            print(f"✅ Deleted {delete_count} documents from vector DB")
+        except Exception as e:
+            print(f"❌ Error deleting documents: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+        try:
+            from methods.FGAPermissionChecker import FGAPermissionChecker  # adjust import path if needed
+            fga_checker = FGAPermissionChecker()
+
+            fga_checker.delete_urls(site_name, urls)
+
+            print(f"Deleted FGA permissions for {len(urls)} docs for site '{site_name}'")
+
+        except Exception as e:
+            print(f"⚠️ Failed to delete FGA tuples: {e}")
+
+
+    def delete_urls(self, site_name, urls):
+        asyncio.run(self.delete_urls_async(site_name, urls))
+        
+    def record_deleted_key(self, site_name, key):
+        """Append key into a deletion queue file."""
+        path = os.path.join('data', 'keys', f"{site_name}.json")
+        #with open(path, "a") as f:
+        #    f.write(key + "\n")
+            
+    def reconcile_removed_pages(self, site_name, current_urls):
+        """Remove deleted URLs from all site-level artifacts."""
+        
+        current_urls = set(current_urls)
+
+        # File paths
+        docs_dir = os.path.join('data', 'docs', site_name)
+        json_path = os.path.join('data', 'json', f"{site_name}.json")
+        emb_path = os.path.join('data', 'embeddings', f"{site_name}.json")
+        keys_path = os.path.join('data', 'keys', f"{site_name}.json")
+
+        # Load stored state
+        stored_json = json.load(open(json_path)) if os.path.exists(json_path) else []
+        stored_embeddings = json.load(open(emb_path)) if os.path.exists(emb_path) else []
+        stored_keys = json.load(open(keys_path)) if os.path.exists(keys_path) else []
+
+        # Identify URLs that existed before but are NOT in sitemap anymore
+        stored_urls = {entry.get("url") for entry in stored_json}
+        deleted_urls = stored_urls - current_urls
+
+        if not deleted_urls:
+            return
+
+        # Remove from database
+        self.delete_urls(site_name, list(deleted_urls))
+
+        for url in deleted_urls:
+            filename = self.url_to_filename(url)
+
+            # 1️⃣ Delete docs file if exists
+            file_path = os.path.join(docs_dir, filename)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            # 2️⃣ Remove from JSON
+            stored_json = [obj for obj in stored_json if obj.get("url") != url]
+
+            # 3️⃣ Remove embeddings
+            stored_embeddings = [e for e in stored_embeddings if e.get("key") != url]
+
+            # 4️⃣ Remove keys
+            stored_keys = [k for k in stored_keys if k.get("key") != url]
+
+            # 5️⃣ Log deletion request for DB cleanup
+            self.record_deleted_key(site_name, url)
+
+            self.logger.info(f"[DELETE] Cleaned removed URL: {url} ({filename})")
+
+        # Write updates back
+        json.dump(stored_json, open(json_path, "w"), indent=2)
+        json.dump(stored_embeddings, open(emb_path, "w"), indent=2)
+        json.dump(stored_keys, open(keys_path, "w"), indent=2)
+
+        # --- After writing modified files, update status file ---
+        status_path = os.path.join('data', 'status', f"{site_name}.json")
+        if os.path.exists(status_path):
+            status = json.load(open(status_path))
+
+            # Update counts based on new state
+            status["total_urls"] = len(current_urls)
+            status["crawled_urls"] = len(stored_json)
+
+            # Update schema statistics
+            from collections import Counter
+            schema_types = [obj.get("@type", "Unknown") for obj in stored_json]
+            
+            status["json_stats"] = {
+                "total_objects": len(stored_json),
+                "type_counts": dict(Counter(schema_types))
+            }
+
+            # Timestamp refresh
+            from datetime import datetime
+            status["last_updated"] = datetime.utcnow().isoformat()
+
+            # Save updated status
+            with open(status_path, "w") as f:
+                json.dump(status, f, indent=2)
+
+            self.logger.info(f"[STATUS UPDATED] {site_name}: {status['crawled_urls']} indexed pages remain.")
+
+
     def url_monitor_thread(self):
         """Thread that monitors the urls directory for changes."""
         # Suppressed: print("URL monitor thread started")
         last_check = {}
-        
         while self.running:
             try:
                 # Clean up deleted sites from last_check
@@ -174,7 +297,7 @@ class Crawler:
                             # Skip deleted sites
                             if site_name in self.deleted_sites:
                                 continue
-                            
+
                             # Check if file is new or modified
                             mtime = os.path.getmtime(filepath)
                             if site_name not in last_check or mtime > last_check[site_name]:
@@ -186,7 +309,10 @@ class Crawler:
                                 
                                 self.sites_urls[site_name] = urls
                                 # Suppressed: print(f"Loaded {len(urls)} URLs for site {site_name}")
-                                
+
+                                # Take care of deleted urls                                
+                                self.reconcile_removed_pages(site_name, urls)
+
                                 # Skip if site has been deleted
                                 if site_name not in self.deleted_sites:
                                     # Check if sitemap processing is complete
