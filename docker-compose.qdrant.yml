@@ -9,7 +9,7 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     environment:
-      QDRANT__SERVICE__API_KEY: "<OPTIONAL>"       
+      QDRANT__SERVICE__API_KEY: "supersecret123"       
     networks:
       - qdrant-net
 

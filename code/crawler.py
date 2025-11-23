@@ -12,6 +12,7 @@ import time
 import random
 import logging
 from collections import deque
+import copy
 
 # Set up the NLWeb submodule path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))  # Add project root to path
@@ -596,31 +597,24 @@ class Crawler:
                     else:
                         # Single object
                         key = self.extract_json_key(data)
+                        original = copy.deepcopy(data)
+
                         if key and key not in self.json_keys.get(site_name, set()):
                             self.save_json_key(site_name, key)
-                            # Flatten the structure
-                            flattened = {
-                                'url': url,
-                                'timestamp': datetime.now().isoformat()
-                            }
-                            flattened.update(data)
-                            schema_data.append(flattened)
-                            # Track type count
-                            if '@type' in data:
-                                self.update_json_type_count(site_name, data['@type'])
-                        elif not key:
-                            # No key, include it
-                            # Flatten the structure
-                            flattened = {
-                                'url': url,
-                                'timestamp': datetime.now().isoformat()
-                            }
-                            flattened.update(data)
-                            schema_data.append(flattened)
-                            # Track type count
-                            if '@type' in data:
-                                self.update_json_type_count(site_name, data['@type'])
-                            
+
+                        # Preserve full JSON-LD and attach tracking metadata
+                        flattened = {
+                            "schema": original,
+                            "url": url,  # keep real page URL separate
+                            "timestamp": datetime.now().isoformat(),
+                        }
+
+                        schema_data.append(flattened)
+
+                        # Track type count
+                        if '@type' in original:
+                            self.update_json_type_count(site_name, original['@type'])
+                                                        
             except json.JSONDecodeError:
                 pass
 
@@ -908,10 +902,19 @@ class Crawler:
         """Prepare text from JSON object for embedding."""
         # Extract key fields based on @type
         text_parts = []
-        
+
+        # Helper to safely extract values from either root or schema
+        def get_value(key):
+            if key in json_obj:
+                return json_obj[key]
+            if "schema" in json_obj and key in json_obj["schema"]:
+                return json_obj["schema"][key]
+            return None
+            
         # Add type if present
-        if '@type' in json_obj:
-            obj_type = json_obj['@type']
+        # Extract @type
+        obj_type = get_value('@type')
+        if obj_type:
             if isinstance(obj_type, list):
                 text_parts.append(f"Type: {', '.join(obj_type)}")
             else:
@@ -1011,18 +1014,26 @@ class Crawler:
                 # Assuming your original data is in a variable called 'batch'
                 transformed_documents = []
                 for doc in batch[1]:
-                    # Create a new document dictionary
+                    # Decide which metadata represents the schema
+                    raw_schema = doc.get("schema_json") or {}
+
+                    # If schema_json was missing or empty, fall back to the metadata dict
+                    if not raw_schema or raw_schema == doc.get("metadata"):
+                        raw_schema = doc.get("metadata", {})
+
+                    # Build transformed structure
                     new_doc = {
                         'url': doc['key'],
                         'embedding': doc['embedding'],
-                        'timestamp': doc['timestamp'],
-                        'site': site_name,   # <--- explicitly set here
+                        'timestamp': doc.get('timestamp'),
+                        'site': site_name,
                         'metadata': {
-                            **doc['metadata'],
+                            **doc.get('metadata', {}),
                             'site': site_name
                         },
-                        'schema_json': doc['metadata']
+                        'schema_json': raw_schema  # <-- preserve rich schema if available
                     }
+
                     transformed_documents.append(new_doc)
 
                 try:
@@ -1031,6 +1042,22 @@ class Crawler:
                     print(f"\n📤 Uploading {len(transformed_documents)} documents to local Qdrant...")
                     upload_count = await upload_documents(transformed_documents)
                     print(f"✅ Uploaded {upload_count} documents")
+
+                    # ✅ Always run FGA integration
+                    try:
+                        from methods.FGAPermissionChecker import FGAPermissionChecker  # adjust import path if needed
+                        fga_checker = FGAPermissionChecker()
+
+                        # Use provided user, otherwise default to "*"
+                        fga_user = "*"
+
+                        urls = [doc["url"] for doc in transformed_documents if "url" in doc]
+                        fga_checker.add_doc_permissions(fga_user, urls, site_name)
+
+                        print(f"Added FGA permissions for {len(urls)} docs for user '{fga_user}'")
+
+                    except Exception as e:
+                        print(f"⚠️ Failed to add FGA tuples: {e}")
 
                     # Save processed keys so we don't re-upload
                     keys = [doc['url'] for doc in transformed_documents]
@@ -1057,16 +1084,15 @@ class Crawler:
 
         print(f"Database worker stopped.")
 
-
     async def save_embeddings(self, site_name, keys, embeddings, original_objects):
-        """Save embeddings to file."""
+        """Save embeddings to file with flexible schema metadata."""
+        
         embeddings_dir = os.path.join('data', 'embeddings')
-        if not os.path.exists(embeddings_dir):
-            os.makedirs(embeddings_dir)
-        
+        os.makedirs(embeddings_dir, exist_ok=True)
+
         embeddings_file = os.path.join(embeddings_dir, f"{site_name}.json")
-        
-        # Load existing embeddings
+
+        # Load existing saved embeddings if present
         existing_data = []
         if os.path.exists(embeddings_file):
             try:
@@ -1074,24 +1100,41 @@ class Crawler:
                     existing_data = json.load(f)
             except Exception:
                 pass
-        
-        # Add new embeddings
+
+        # Build new embedding entries
         for i, (key, embedding) in enumerate(zip(keys, embeddings)):
+
+            schema = original_objects[i]  # Full extracted schema (raw)
+            
+            # ---- Minimal guaranteed metadata (works even if no JSON-LD existed) ----
+            normalized_metadata = {
+                '@type': schema.get('@type', 'Unknown'),
+                'name': schema.get('name', schema.get('headline', key)),
+                'url': schema.get('url', key),
+                'description': schema.get('description', '')
+            }
+
+            # ---- OPTIONAL: Auto-flatten top level primitive fields ----
+            # (If a field is a simple string/number/bool, include it in metadata)
+            for field, value in schema.items():
+                if isinstance(value, (str, int, float, bool)) and field not in normalized_metadata:
+                    normalized_metadata[field] = value
+
             embedding_obj = {
                 'key': key,
                 'embedding': embedding,
                 'timestamp': datetime.now().isoformat(),
-                'metadata': {
-                    '@type': original_objects[i].get('@type', 'Unknown'),
-                    'name': original_objects[i].get('name', original_objects[i].get('headline', '')),
-                    'url': original_objects[i].get('url', '')
-                }
+                'metadata': normalized_metadata,
+                'schema_json': schema  # Full raw schema retained
             }
+
             existing_data.append(embedding_obj)
-        
+
         # Write back to file
         with open(embeddings_file, 'w') as f:
             json.dump(existing_data, f, indent=2)
+
+        print(f"💾 Saved {len(keys)} embeddings to: {embeddings_file}")
     
     def requeue_urls(self):
         """Requeue URLs with domain diversity."""

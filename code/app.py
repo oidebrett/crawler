@@ -529,6 +529,9 @@ def delete_site_data(site_name):
     keys_file = os.path.join('data', 'keys', f"{site_name}.json")
     if os.path.exists(keys_file):
         os.remove(keys_file)
+    keys_file_txt = os.path.join('data', 'keys', f"{site_name}.txt")
+    if os.path.exists(keys_file_txt):
+        os.remove(keys_file_txt)
     
     # Delete status file
     status_file = os.path.join('data', 'status', f"{site_name}.json")
@@ -540,6 +543,15 @@ def delete_site(site_name):
     """Delete a site and all its associated data."""
     try:
         delete_site_data(site_name)
+
+        try:
+            from methods.FGAPermissionChecker import FGAPermissionChecker  # adjust import path if needed
+            fga_checker = FGAPermissionChecker()
+            fga_checker.delete_site(site_name)
+            print(f"Deleted FGA permissions for docs in site: {site_name}")
+        except Exception as e:
+            print(f"⚠️ Failed to delete FGA tuples: {e}")
+
         return jsonify({'success': True, 'message': f'Site {site_name} deleted successfully'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
