@@ -6,12 +6,17 @@ Run this from the project root directory.
 
 import sys
 import os
+import threading
 
 # Add code directory to Python path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'code'))
+code_dir = os.path.join(os.path.dirname(__file__), 'code')
+sys.path.insert(0, code_dir)
+
+# Set up the NLWeb submodule path for imports
+import setup_submodule_path  # This automatically sets up the submodule path
 
 # Import and run the Flask app
-from app import app, ensure_directories_exist, start_crawler
+from app import app, ensure_directories_exist, start_crawler, refresh_sitemaps_loop
 
 if __name__ == '__main__':
     # Ensure directories exist
@@ -25,5 +30,8 @@ if __name__ == '__main__':
     cli = sys_module.modules['flask.cli']
     cli.show_server_banner = lambda *x: None
     
+    # *** START PERIODIC SITEMAP REFRESH HERE ***
+    threading.Thread(target=refresh_sitemaps_loop, daemon=True).start()
+
     # Run the Flask app
-    app.run(debug=False, threaded=True, use_reloader=False)
+    app.run(host='0.0.0.0', debug=False, threaded=True, use_reloader=False)

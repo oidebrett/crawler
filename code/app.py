@@ -13,6 +13,7 @@ import queue
 import logging
 import gzip
 import re
+import time
 
 app = Flask(__name__, template_folder='../templates')
 
@@ -37,6 +38,10 @@ crawler_thread = None
 # Background task executor for processing sites
 site_processor = ThreadPoolExecutor(max_workers=2)
 processing_status = {}  # Track processing status for each site
+
+# check sitemap every hour (adjust if needed)
+#SITEMAP_REFRESH_INTERVAL = 60 * 60  
+SITEMAP_REFRESH_INTERVAL = 30
 
 def get_site_name(url):
     """Extract site name from URL for file naming."""
@@ -104,29 +109,30 @@ def parse_sitemap(sitemap_url, url_filter=None):
     
     return urls, sub_sitemaps
 
-def update_urls_file(site_name, urls):
-    """Update the URLs file for a site."""
+def update_urls_file(site_name, urls, overwrite=False):
+    """Update the URLs file. If overwrite=True, the file is replaced rather than merged."""
     urls_dir = os.path.join('data', 'urls')
-    if not os.path.exists(urls_dir):
-        os.makedirs(urls_dir)
-    
+    os.makedirs(urls_dir, exist_ok=True)
+
     file_path = os.path.join(urls_dir, f"{site_name}.txt")
-    
-    # Read existing URLs
-    existing_urls = set()
-    if os.path.exists(file_path):
-        with open(file_path, 'r') as f:
-            existing_urls = set(line.strip() for line in f if line.strip())
-    
-    # Add new URLs
-    existing_urls.update(urls)
-    
-    # Write back all URLs
+
+    if overwrite:
+        new_set = set(urls)
+    else:
+        new_set = set()
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                new_set = set(line.strip() for line in f if line.strip())
+        new_set.update(urls)
+
     with open(file_path, 'w') as f:
-        for url in sorted(existing_urls):
+        for url in sorted(new_set):
             f.write(url + '\n')
-    
-    return len(existing_urls)
+
+    # Force modification time update so crawler detects change
+    os.utime(file_path, None)
+
+    return len(new_set)
 
 def get_json_type_counts(site_name):
     """Get counts of JSON objects by @type for a site from status file."""
@@ -520,10 +526,18 @@ def delete_site_data(site_name):
     if os.path.exists(json_file):
         os.remove(json_file)
     
+    # Delete embeddings file
+    embeddings_file = os.path.join('data', 'embeddings', f"{site_name}.json")
+    if os.path.exists(embeddings_file):
+        os.remove(embeddings_file)
+    
     # Delete keys file
-    keys_file = os.path.join('data', 'keys', f"{site_name}.txt")
+    keys_file = os.path.join('data', 'keys', f"{site_name}.json")
     if os.path.exists(keys_file):
         os.remove(keys_file)
+    keys_file_txt = os.path.join('data', 'keys', f"{site_name}.txt")
+    if os.path.exists(keys_file_txt):
+        os.remove(keys_file_txt)
     
     # Delete status file
     status_file = os.path.join('data', 'status', f"{site_name}.json")
@@ -535,6 +549,15 @@ def delete_site(site_name):
     """Delete a site and all its associated data."""
     try:
         delete_site_data(site_name)
+
+        try:
+            from methods.FGAPermissionChecker import FGAPermissionChecker  # adjust import path if needed
+            fga_checker = FGAPermissionChecker()
+            fga_checker.delete_site(site_name)
+            print(f"Deleted FGA permissions for docs in site: {site_name}")
+        except Exception as e:
+            print(f"⚠️ Failed to delete FGA tuples: {e}")
+
         return jsonify({'success': True, 'message': f'Site {site_name} deleted successfully'})
     except Exception as e:
         return jsonify({'success': False, 'message': str(e)}), 500
@@ -788,6 +811,42 @@ def ensure_directories_exist():
     if not os.path.exists('logs'):
         os.makedirs('logs')
 
+def refresh_sitemaps_loop():
+    """Continuously re-fetch sitemap for each monitored site and update URL files."""
+    while True:
+        try:
+            status_dir = os.path.join('data', 'status')
+            if not os.path.exists(status_dir):
+                time.sleep(10)
+                continue
+
+            for filename in os.listdir(status_dir):
+                if not filename.endswith(".json"):
+                    continue
+
+                site_name = filename[:-5]
+                status = get_site_status(site_name)
+                sitemap_url = status.get("original_url")
+
+                if not sitemap_url:
+                    continue
+
+                urls, sitemaps = parse_sitemap(sitemap_url)
+
+                # process nested sitemaps
+                while sitemaps:
+                    sm = sitemaps.pop()
+                    u, more = parse_sitemap(sm)
+                    urls.extend(u)
+                    sitemaps.extend(more)
+
+                update_urls_file(site_name, urls, overwrite=True)
+
+        except Exception as e:
+            print(f"[ERROR] Sitemap refresh failed: {e}")
+
+        time.sleep(SITEMAP_REFRESH_INTERVAL)
+
 if __name__ == '__main__':
     # Ensure directories exist
     ensure_directories_exist()
@@ -803,4 +862,6 @@ if __name__ == '__main__':
     cli = sys.modules['flask.cli']
     cli.show_server_banner = lambda *x: None
     
+    threading.Thread(target=refresh_sitemaps_loop, daemon=True).start()
+
     app.run(debug=False, threaded=True, use_reloader=False)
