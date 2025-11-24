@@ -40,8 +40,8 @@ site_processor = ThreadPoolExecutor(max_workers=2)
 processing_status = {}  # Track processing status for each site
 
 # check sitemap every hour (adjust if needed)
-#SITEMAP_REFRESH_INTERVAL = 60 * 60  
-SITEMAP_REFRESH_INTERVAL = 30
+SITEMAP_REFRESH_INTERVAL = 60 * 60  
+#SITEMAP_REFRESH_INTERVAL = 30
 
 def get_site_name(url):
     """Extract site name from URL for file naming."""
